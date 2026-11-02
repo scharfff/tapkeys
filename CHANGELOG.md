@@ -12,7 +12,7 @@
 - The first launch opens the settings window, so the app is visible even when a menu bar manager hides its icon.
 - Opening TapKeys again from Finder, Spotlight or Launchpad brings up the settings window.
 - A hint in General for a missing menu bar icon (Ice, Bartender, the notch).
-- CI on every push and pull request: build on macOS 15 and 26 (Apple Silicon) and macOS 15 (Intel), self-test, DMG and zip checks. Releases are published as a draft, checked, and only then made public, with a SHA256SUMS file.
+- CI on every push and pull request: build on macOS 26 (Apple Silicon) and macOS 15 (Intel), self-test, DMG and zip checks. Releases are published as a draft, checked, and only then made public, with a SHA256SUMS file.
 - Homebrew: `brew install --cask scharfff/tap/tapkeys`.
 - A DMG installer with a drag to Applications window, built by scripts/make_dmg.sh and attached to every release.
 
