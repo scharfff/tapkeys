@@ -6,6 +6,7 @@
 
 import Carbon.HIToolbox
 import Cocoa
+import IOKit
 
 final class Engine {
     static let shared = Engine()
@@ -42,6 +43,18 @@ final class Engine {
 
     func markClicked() {
         lock.lock(); clicked = true; lock.unlock()
+    }
+
+    /// Forgets the touch in progress when the trackpads are listed again: a device that
+    /// went away never reports its fingers lifting, and a stale finger count would turn
+    /// the next ordinary click into a multi-finger click.
+    func resetTouches() {
+        lock.lock(); defer { lock.unlock() }
+        fingerCount = 0
+        touching = false
+        lastCount = 0
+        maxFingers = 0
+        lastTapEnd = 0
     }
 
     /// Feeds one multitouch frame. Returns a tap gesture when one just completed.
@@ -184,8 +197,9 @@ final class LayoutCache: NSObject {
 // MARK: - Multitouch
 
 typealias MTDeviceCreateListFn = @convention(c) () -> Unmanaged<CFMutableArray>?
-typealias MTRegisterContactFrameCallbackFn = @convention(c) (MTDeviceRef?, MTFrameCallbackFunction?) -> Void
+typealias MTContactFrameCallbackFn = @convention(c) (MTDeviceRef?, MTFrameCallbackFunction?) -> Void
 typealias MTDeviceStartFn = @convention(c) (MTDeviceRef?, Int32) -> Void
+typealias MTDeviceStopFn = @convention(c) (MTDeviceRef?) -> Void
 
 let frameCallback: MTFrameCallbackFunction = { _, touches, numTouches, timestamp, _ in
     if let gesture = Engine.shared.handleFrame(touches: touches, count: Int(numTouches), timestamp: timestamp),
@@ -195,32 +209,135 @@ let frameCallback: MTFrameCallbackFunction = { _, touches, numTouches, timestamp
     return 0
 }
 
-var multitouchDevices: CFMutableArray?  // kept alive for the lifetime of the app
+/// Listens on every trackpad and lists them again when the set may have changed.
+///
+/// A device from MTDeviceCreateList is bound to one kernel object. On an Intel MacBook the
+/// built in trackpad is a USB device that the kernel tears down and creates again on every
+/// wake (log: "AppleMultitouchDevice::willTerminate", then "::start" with a new registry
+/// ID), and a Magic Trackpad comes and goes with Bluetooth. A device bound to a removed
+/// object never calls back, so gestures stop until the list is rebuilt: after wake, after
+/// the screens wake, and whenever IOKit reports a trackpad added or removed. Main thread only.
+final class Multitouch {
+    static let shared = Multitouch()
 
-/// Starts listening on every trackpad. Returns the number of devices found.
-@discardableResult
-func startMultitouch() -> Int {
-    let path = "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
-    guard let handle = dlopen(path, RTLD_NOW),
-          let createList = dlsym(handle, "MTDeviceCreateList"),
-          let register = dlsym(handle, "MTRegisterContactFrameCallback"),
-          let start = dlsym(handle, "MTDeviceStart") else {
-        NSLog("TapKeys: MultitouchSupport is unavailable")
-        return 0
+    private struct API {
+        let createList: MTDeviceCreateListFn
+        let register: MTContactFrameCallbackFn
+        let unregister: MTContactFrameCallbackFn
+        let start: MTDeviceStartFn
+        let stop: MTDeviceStopFn
     }
-    let createListFn = unsafeBitCast(createList, to: MTDeviceCreateListFn.self)
-    let registerFn = unsafeBitCast(register, to: MTRegisterContactFrameCallbackFn.self)
-    let startFn = unsafeBitCast(start, to: MTDeviceStartFn.self)
 
-    guard let devices = createListFn()?.takeRetainedValue() else { return 0 }
-    multitouchDevices = devices
-    let count = CFArrayGetCount(devices)
-    for i in 0..<count {
-        let device = UnsafeMutableRawPointer(mutating: CFArrayGetValueAtIndex(devices, i))
-        registerFn(device, frameCallback)
-        startFn(device, 0)
+    private lazy var api: API? = {
+        let path = "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
+        guard let handle = dlopen(path, RTLD_NOW),
+              let createList = dlsym(handle, "MTDeviceCreateList"),
+              let register = dlsym(handle, "MTRegisterContactFrameCallback"),
+              let unregister = dlsym(handle, "MTUnregisterContactFrameCallback"),
+              let start = dlsym(handle, "MTDeviceStart"),
+              let stop = dlsym(handle, "MTDeviceStop") else {
+            NSLog("TapKeys: MultitouchSupport is unavailable")
+            return nil
+        }
+        return API(createList: unsafeBitCast(createList, to: MTDeviceCreateListFn.self),
+                   register: unsafeBitCast(register, to: MTContactFrameCallbackFn.self),
+                   unregister: unsafeBitCast(unregister, to: MTContactFrameCallbackFn.self),
+                   start: unsafeBitCast(start, to: MTDeviceStartFn.self),
+                   stop: unsafeBitCast(stop, to: MTDeviceStopFn.self))
+    }()
+
+    /// The current devices. The list holds the only reference to each one (retain count 1
+    /// right after MTDeviceCreateList), so dropping the list frees them.
+    private var devices: CFMutableArray?
+    private var restartTimer: Timer?
+    private var notificationPort: IONotificationPortRef?
+
+    /// Stops the current devices, lists the trackpads again and starts them.
+    /// Returns the number of devices found.
+    @discardableResult
+    func start() -> Int {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stop()
+        guard let api, let list = api.createList()?.takeRetainedValue() else { return 0 }
+        devices = list
+        let count = CFArrayGetCount(list)
+        for i in 0..<count {
+            let device = UnsafeMutableRawPointer(mutating: CFArrayGetValueAtIndex(list, i))
+            api.register(device, frameCallback)
+            api.start(device, 0)
+        }
+        return count
     }
-    return count
+
+    /// Unregisters and stops every device, then releases them with the list. No
+    /// MTDeviceRelease on top: the list owns the devices, a second release would free them twice.
+    func stop() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let api, let list = devices else { return }
+        for i in 0..<CFArrayGetCount(list) {
+            let device = UnsafeMutableRawPointer(mutating: CFArrayGetValueAtIndex(list, i))
+            api.unregister(device, frameCallback)
+            api.stop(device)
+        }
+        devices = nil
+        Engine.shared.resetTouches()
+    }
+
+    /// Rebuilds the device list once `delay` seconds pass without another request, so a
+    /// wake that removes and adds the trackpad and wakes the screens restarts it once.
+    func scheduleRestart(after delay: TimeInterval, reason: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        restartTimer?.invalidate()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.restartTimer = nil
+            NSLog("TapKeys: %@, trackpads found again: %d", reason, self.start())
+        }
+        // Common modes: restart even while a menu is open.
+        RunLoop.main.add(timer, forMode: .common)
+        restartTimer = timer
+    }
+
+    /// Subscribes to wake and to trackpads being added or removed. Call once, after start().
+    func watch() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                // Give the kernel a moment to finish bringing the trackpad back.
+                self?.scheduleRestart(after: 2, reason: note.name.rawValue)
+            }
+        }
+
+        guard let port = IONotificationPortCreate(kIOMainPortDefault) else {
+            NSLog("TapKeys: no IOKit notification port, a trackpad connected later needs a restart")
+            return
+        }
+        notificationPort = port
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(),
+                           .commonModes)
+        let changed: IOServiceMatchingCallback = { _, iterator in
+            Multitouch.drain(iterator)
+            Multitouch.shared.scheduleRestart(after: 1, reason: "trackpad added or removed")
+        }
+        for type in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            let result = IOServiceAddMatchingNotification(port, type, IOServiceMatching("AppleMultitouchDevice"),
+                                                          changed, nil, &iterator)
+            if result == KERN_SUCCESS {
+                // Draining arms the notification. The trackpads already present are started.
+                Multitouch.drain(iterator)
+            } else {
+                NSLog("TapKeys: IOKit notification %@ failed (%d)", type, result)
+            }
+        }
+    }
+
+    private static func drain(_ iterator: io_iterator_t) {
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            IOObjectRelease(service)
+        }
+    }
 }
 
 // MARK: - Click interception
@@ -316,10 +433,26 @@ final class AccessibilityWatch: ObservableObject {
         let now = AXIsProcessTrusted()
         if now != trusted { trusted = now }
         if now {
-            startClickTap()
+            let hadTap = eventTap != nil
+            if startClickTap(), !hadTap { NSLog("TapKeys: click tap created") }
+            keepClickTapEnabled()
         } else if eventTap != nil {
             stopClickTap()
             NSLog("TapKeys: Accessibility access is gone, click tap removed")
+        }
+    }
+
+    /// The system can disable the tap without telling it: the tapDisabled event reaches the
+    /// callback only with the next click, and around sleep the mach port can die. Checked
+    /// every second, so a disabled tap is back within a second of wake.
+    private func keepClickTapEnabled() {
+        guard let tap = eventTap else { return }
+        if !CFMachPortIsValid(tap) {
+            stopClickTap()
+            NSLog("TapKeys: click tap port was invalidated, creating it again: %d", startClickTap())
+        } else if !CGEvent.tapIsEnabled(tap: tap) {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            NSLog("TapKeys: click tap was disabled, enabled it again")
         }
     }
 }
