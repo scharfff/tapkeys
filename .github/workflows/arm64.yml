@@ -1,0 +1,49 @@
+name: arm64 (informational)
+
+# Builds and tests the app on an Apple Silicon runner, so the arm64 slice is run natively at least somewhere.
+# It is NOT part of CI: ci.yml and the "CI result" check do not depend on it, and release.yml reads only
+# ci.yml. Hosted arm64 runners can be unavailable for hours ("capacity constraints", the job is cancelled
+# after about 15 minutes, as on 2 November 2026): then this workflow is red or cancelled and nothing else changes.
+# The steps repeat the build job of ci.yml; change both files together.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build (macos-26, informational)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcode-select -p
+          swift --version
+      - name: Build universal app
+        run: ./build.sh
+      - name: Self-test (arm64 slice runs natively)
+        run: ./build/TapKeys.app/Contents/MacOS/TapKeys --selftest
+      - name: Package (zip, DMG, SHA256SUMS)
+        env:
+          DMG_LAYOUT: template
+        run: ./scripts/package.sh
+      - name: Smoke test of the packages
+        run: ./scripts/smoke_test.sh build
