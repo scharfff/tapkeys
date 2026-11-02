@@ -56,15 +56,16 @@ jobs:
         # macos-14 is retired (2 November 2026), macos-13 earlier; macos-latest is not used on purpose,
         # so a runner upgrade never changes the toolchain unnoticed. The app targets macOS 13.0:
         # the deployment target is checked in the smoke test, not by running macOS 13.
-        # Every runner builds both slices (universal binary), but runs only the slice of its own CPU.
-        #   macos-15-intel  Intel, also the release runner (release.yml uses the same label): macOS 15 with
-        #                   Xcode 16.4; the x86_64 slice runs natively, its DMG and zip are uploaded
-        #   macos-26        Apple Silicon: the arm64 slice runs natively, the newest toolchain and SDK
-        # macos-15 (Apple Silicon) was removed on 2 November 2026: its jobs got no runner for 15 minutes
-        # ("capacity constraints") and were cancelled, which kept CI red. Do not put it back as a required job.
+        # One required runner: macos-15-intel, also the release runner (release.yml uses the same label).
+        # macOS 15 with Xcode 16.4; the x86_64 slice runs natively, the DMG and zip are uploaded.
+        # The universal binary is built here with both slices, but the arm64 slice is only checked
+        # with lipo, vtool and codesign. Running it natively is the job of arm64.yml (informational).
+        # Apple Silicon is not in this matrix on purpose: on 2 November 2026 GitHub gave no hosted arm64
+        # runner at all (macos-15 and macos-26, "capacity constraints", cancelled after 15 minutes), and a
+        # cancelled job keeps this workflow red, which release.yml reads. Do not add arm64 runners here.
         # Intel macOS runners are expected to end in fall 2027 (see actions/runner-images): the release
         # runner then has to move to Apple Silicon, and the SDK of the shipped binary changes with it.
-        runner: [macos-15-intel, macos-26]
+        runner: [macos-15-intel]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

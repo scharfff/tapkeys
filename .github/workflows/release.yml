@@ -29,7 +29,7 @@ jobs:
     name: Build and package
     # macos-15-intel: macOS 15 and Xcode 16.4, the toolchain every release is built with (the same as the
     # former macos-15 Apple Silicon runner). It builds both slices and runs the x86_64 one; the arm64 slice
-    # is only built and checked with lipo, vtool and codesign; CI runs an arm64 build of the same commit on macos-26.
+    # is only built and checked with lipo, vtool and codesign: no required job runs it natively.
     # Not macos-26: the SDK 26 can change how the app looks on macOS 26.
     runs-on: macos-15-intel
     timeout-minutes: 40
@@ -76,7 +76,7 @@ jobs:
             echo "::error::Commit $GITHUB_SHA is not on main. Merge it first, then tag main."
             exit 1
           fi
-          # CI must have passed on exactly this commit (it also covers macos-26, Apple Silicon, which this job does not run).
+          # CI (ci.yml only: lint and the same build, self-test, packages and smoke test on macos-15-intel) must have passed on exactly this commit.
           # A tag set right after a merge finds CI still running: wait for it, up to 15 minutes.
           # Fail at once when CI finished on this commit without a success.
           deadline=$((SECONDS + 900))
