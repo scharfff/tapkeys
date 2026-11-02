@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/icon.png" width="128" alt="TapKeys icon">
   <h1>TapKeys</h1>
-  <p><b>Free and open source trackpad gestures for macOS.</b><br>For people who only need a few BetterTouchTool triggers, such as double tap to copy and three-finger click to paste.</p>
+  <p><b>Free and open source trackpad gestures for macOS.</b><br>Bind your own shortcuts and actions to trackpad taps and clicks, right from the menu bar.</p>
   <p><b>English</b> · <a href="README.ru.md">Русский</a></p>
   <p>
     <a href="https://github.com/scharfff/tapkeys/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scharfff/tapkeys?style=flat-square"></a>
@@ -103,6 +103,7 @@ If BetterTouchTool is installed, quit it or disable its matching triggers.
 | `scripts/make_dmg.sh` | builds `build/TapKeys-X.Y.Z.dmg` |
 | `scripts/make_dmg_background.swift` | renders the DMG window background in `Resources/` |
 | `scripts/package.sh` | builds the zip, the DMG and `SHA256SUMS` for a release |
+| `scripts/detach_image.sh` | detaches a mounted disk image with retries (used by the DMG build and the smoke test) |
 | `scripts/smoke_test.sh` | checks a built package: signature, both architectures, self-test from the DMG |
 | `scripts/changelog_notes.sh` | extracts the release notes for a version from `CHANGELOG.md` |
 | `.github/workflows/ci.yml` | build and checks on every push and pull request |
