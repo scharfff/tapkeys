@@ -43,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         LayoutCache.shared.start()
-        startMultitouch()
+        Multitouch.shared.start()
+        Multitouch.shared.watch()
         // The click tap needs Accessibility access: ask once here; AccessibilityWatch then
         // creates the tap when access is granted and removes it when access goes away.
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -87,7 +88,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 if CommandLine.arguments.contains("--selftest") {
     // Loads the framework and counts trackpads without touching any events.
-    print("trackpads found: \(startMultitouch())")
+    print("trackpads found: \(Multitouch.shared.start())")
+    // Rebuilds the device list twice in a row, as a wake does: the old devices are
+    // unregistered, stopped and released, then the trackpads are listed and started again.
+    for round in 1...2 {
+        print("restart \(round): trackpads found: \(Multitouch.shared.start())")
+    }
+    // The wake path end to end: the observer schedules a restart, the timer fires it.
+    Multitouch.shared.watch()
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 3))
+    Multitouch.shared.stop()
     print("accessibility granted: \(AXIsProcessTrusted())")
     // Fills the layout cache the same way the app does at launch; no event tap is created.
     LayoutCache.shared.start()

@@ -21,6 +21,7 @@
 - Preset shortcuts follow the current keyboard layout, so Undo or Select all no longer turn into ⌘W or ⌘Q on AZERTY or Dvorak.
 - A lost mouse up after a swallowed click no longer blocks the next normal click.
 - Turning off or removing TapKeys in Accessibility while it runs no longer freezes clicks in every app: the click tap is removed within a second, and a multi-finger click runs its action only after the tap has returned.
+- Gestures no longer stop after sleep: the system re-creates the trackpad on wake, so TapKeys lists the trackpads again after wake and whenever one is connected or disconnected.
 
 ## [0.1.0] - 2026-10-30
 
