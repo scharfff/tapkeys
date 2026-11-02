@@ -26,7 +26,9 @@ cd "$(dirname "$0")/.."
 APP=build/TapKeys.app
 VOLNAME=TapKeys
 TEMPLATE=scripts/dmg_layout.DS_Store
-WORK=build/dmg-work
+# A folder of its own for every run (also holds the mount points), so that two runs never share a mount.
+mkdir -p build
+WORK="$(mktemp -d build/dmg-work.XXXXXX)"
 
 # Layout in window points, measured from the top left corner of the window content.
 # Keep in sync with scripts/make_dmg_background.swift.
@@ -57,6 +59,7 @@ log() { echo "==> $*"; }
 fail() { echo "error: $*" >&2; exit 1; }
 
 DEVICE=""
+MOUNT=""
 cleanup() {
     if [[ -n "$DEVICE" ]]; then
         hdiutil detach "$DEVICE" -force >/dev/null 2>&1 || true
@@ -79,13 +82,10 @@ run_timeout() {
     return "$rc"
 }
 
+# Retries, then -force, and says who holds the volume when it still fails: see scripts/detach_image.sh
 detach() {
-    for _ in 1 2 3 4 5; do
-        if hdiutil detach "$DEVICE" >/dev/null 2>&1; then DEVICE=""; return 0; fi
-        sleep 2
-    done
-    hdiutil detach "$DEVICE" -force >/dev/null 2>&1 && { DEVICE=""; return 0; }
-    fail "cannot detach $DEVICE"
+    ./scripts/detach_image.sh "$DEVICE" "$MOUNT" || fail "cannot detach $DEVICE"
+    DEVICE=""
 }
 
 # 1. The app: rebuild only when sources are newer than the binary.
@@ -106,7 +106,6 @@ if [[ ! -f Resources/dmg-background.png || ! -f Resources/dmg-background@2x.png 
     log "rendering the background"
     swift scripts/make_dmg_background.swift
 fi
-rm -rf "$WORK"
 mkdir -p "$WORK/staging/.background" "$WORK/tiff"
 sips -s format tiff Resources/dmg-background.png    --out "$WORK/tiff/1x.tiff" >/dev/null
 sips -s format tiff Resources/dmg-background@2x.png --out "$WORK/tiff/2x.tiff" >/dev/null
@@ -117,6 +116,9 @@ tiffutil -cathidpicheck "$WORK/tiff/1x.tiff" "$WORK/tiff/2x.tiff" -out "$WORK/st
 # 3. Staging folder: app, Applications shortcut, volume icon.
 ditto "$APP" "$WORK/staging/TapKeys.app"
 ln -s /Applications "$WORK/staging/Applications"
+# Tells Spotlight not to index the volume, from the first second it is mounted: mds holding the
+# volume is the usual reason for "Resource busy" on detach. A hidden file, the window is unchanged.
+touch "$WORK/staging/.metadata_never_index"
 
 use_template=0
 if [[ "$LAYOUT" == template ]]; then use_template=1; fi
@@ -128,7 +130,8 @@ if [[ "$use_template" == 1 ]]; then
 fi
 
 # 4. Read write image, sized from the staging folder plus room for .DS_Store and the filesystem.
-if [[ -e "/Volumes/$VOLNAME" ]]; then
+# Finder arranges the window by the volume name, so only that mode needs /Volumes/TapKeys.
+if [[ "$use_template" == 0 && -e "/Volumes/$VOLNAME" ]]; then
     fail "/Volumes/$VOLNAME is already mounted; eject it first"
 fi
 size_mb=$(( $(du -sk "$WORK/staging" | awk '{print $1}') * 2 / 1024 + 10 ))
@@ -145,10 +148,19 @@ for attempt in 1 2 3; do
     sleep 5
 done
 [[ "$created" == 1 ]] || fail "hdiutil create failed 3 times"
-DEVICE="$(hdiutil attach "$WORK/rw.dmg" -readwrite -noverify -noautoopen | awk '/^\/dev\/disk/ {print $1; exit}')"
+if [[ "$use_template" == 1 ]]; then
+    # No Finder involved: a private mount point inside $WORK, hidden from Finder (-nobrowse).
+    MOUNT="$WORK/mnt"
+    mkdir -p "$MOUNT"
+    DEVICE="$(hdiutil attach "$WORK/rw.dmg" -readwrite -noverify -noautoopen -nobrowse -mountpoint "$MOUNT" | awk '/^\/dev\/disk/ {print $1; exit}')"
+else
+    MOUNT="/Volumes/$VOLNAME"
+    DEVICE="$(hdiutil attach "$WORK/rw.dmg" -readwrite -noverify -noautoopen | awk '/^\/dev\/disk/ {print $1; exit}')"
+fi
 [[ -n "$DEVICE" ]] || fail "hdiutil attach returned no device"
-MOUNT="/Volumes/$VOLNAME"
 [[ -d "$MOUNT" ]] || fail "$MOUNT did not appear after attach"
+# Best effort, may need more rights than a user has: errors are ignored, .metadata_never_index is the main guard.
+mdutil -i off "$MOUNT" >/dev/null 2>&1 || true
 
 # 5. Layout through Finder.
 finder_layout() {
@@ -245,7 +257,9 @@ hdiutil convert "$WORK/rw.dmg" -format UDZO -imagekey zlib-level=9 -ov -o "$OUT"
 hdiutil verify "$OUT" >/dev/null
 CHECK="$WORK/check"
 mkdir -p "$CHECK"
+MOUNT="$CHECK"
 DEVICE="$(hdiutil attach "$OUT" -readonly -nobrowse -noautoopen -mountpoint "$CHECK" | awk '/^\/dev\/disk/ {print $1; exit}')"
+[[ -n "$DEVICE" ]] || fail "hdiutil attach of the finished DMG returned no device"
 for item in TapKeys.app Applications .background/background.tiff .DS_Store; do
     [[ -e "$CHECK/$item" || -L "$CHECK/$item" ]] || { detach; fail "$item is missing in the finished DMG"; }
 done

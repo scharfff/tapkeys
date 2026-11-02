@@ -20,6 +20,7 @@ fail() { echo "error: $*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tapkeys-smoke.XXXXXX")"
 DEVICE=""
+MOUNT=""
 cleanup() {
     if [[ -n "$DEVICE" ]]; then hdiutil detach "$DEVICE" -force >/dev/null 2>&1 || true; fi
     rm -rf "$TMP"
@@ -86,7 +87,8 @@ done
 [[ "$(readlink "$MOUNT/Applications")" == "/Applications" ]] || fail "the Applications link does not point to /Applications"
 check_app "$MOUNT/TapKeys.app" "dmg"
 cp "$MOUNT/TapKeys.app/Contents/MacOS/TapKeys" "$TMP/dmg-binary"
-hdiutil detach "$DEVICE" >/dev/null && DEVICE=""
+"$(dirname "$0")/detach_image.sh" "$DEVICE" "$MOUNT" || fail "cannot detach $DEVICE"
+DEVICE=""
 
 log "zip: unpack"
 UNZIP="$TMP/unzip"
