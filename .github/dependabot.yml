@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keeps the SHA pins of GitHub Actions current. Dependabot rewrites the commit SHA and the
+  # version comment next to it, so the pins stay readable.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]

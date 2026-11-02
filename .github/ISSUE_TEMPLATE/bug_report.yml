@@ -1,0 +1,57 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: input
+    id: tapkeys-version
+    attributes:
+      label: TapKeys version
+      description: Settings, About tab, or the menu bar item.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "macOS 15.7"
+    validations:
+      required: true
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model and trackpad
+      description: Apple menu, About This Mac. Built-in trackpad or Magic Trackpad?
+      placeholder: "MacBook Pro 14-inch 2023, M2 Pro, built-in trackpad"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Homebrew
+        - DMG from GitHub Releases
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Is Accessibility access granted? Output of `/Applications/TapKeys.app/Contents/MacOS/TapKeys --selftest`, logs, screenshots.

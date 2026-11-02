@@ -1,0 +1,269 @@
+name: Release
+
+# Push a tag vX.Y.Z (X.Y.Z must equal CFBundleShortVersionString in Info.plist) to release.
+# build    guards, build, zip and DMG, smoke test, SHA256SUMS      (read only token)
+# publish  draft release, check the uploaded assets, publish        (contents: write)
+# cask     update version and sha256 in scharfff/homebrew-tap       (only when HOMEBREW_TAP_TOKEN is set)
+# The jobs are split so that a failed cask update can be re-run alone ("Re-run failed jobs")
+# without touching the published release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Releases never run in parallel and never cancel each other.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: macos-15
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read # for gh run list: the commit must have a green CI run
+    outputs:
+      version: ${{ steps.guards.outputs.version }}
+      prerelease: ${{ steps.guards.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the guard below needs the history of main
+          persist-credentials: false
+      # Cheap guards before the long build.
+      - name: Guards
+        id: guards
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Tag '$tag' is not vMAJOR.MINOR.PATCH (a suffix like -rc1 is allowed)."
+            exit 1
+          fi
+          version="${tag#v}"
+          plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
+          if [[ "$version" != "$plist_version" ]]; then
+            echo "::error::Tag does not match Info.plist: tag $tag gives version '$version', but CFBundleShortVersionString is '$plist_version'. Fix Info.plist or re-tag."
+            exit 1
+          fi
+          # CHANGELOG.md must have notes for this version.
+          ./scripts/changelog_notes.sh "$version" > /dev/null || { echo "::error::CHANGELOG.md has no notes for $version. Add '## [$version] - YYYY-MM-DD' with entries."; exit 1; }
+          # The tagged commit must be on main: a release is never built from an unmerged branch.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Commit $GITHUB_SHA is not on main. Merge it first, then tag main."
+            exit 1
+          fi
+          # CI must have passed on exactly this commit (covers macos-26 and Intel, which this job does not build).
+          green="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --status success --json conclusion --jq 'length')"
+          if [[ "$green" == 0 ]]; then
+            echo "::error::No successful CI run for commit $GITHUB_SHA. Wait for CI on main to pass, then re-run this workflow."
+            exit 1
+          fi
+          prerelease=false
+          if [[ "$tag" == *-* ]]; then prerelease=true; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcode-select -p
+          swift --version
+      - name: Build universal app
+        run: ./build.sh
+      - name: Self-test
+        run: ./build/TapKeys.app/Contents/MacOS/TapKeys --selftest
+      # The window layout comes from the recorded template scripts/dmg_layout.DS_Store, Finder is not used.
+      - name: Package (zip, DMG, SHA256SUMS)
+        env:
+          DMG_LAYOUT: template
+        run: ./scripts/package.sh
+      - name: Smoke test of the packages
+        run: ./scripts/smoke_test.sh build
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.guards.outputs.version }}
+        run: |
+          ./scripts/changelog_notes.sh "$VERSION" > build/notes.md
+          cat build/notes.md
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: |
+            build/TapKeys-v*.zip
+            build/TapKeys-*.dmg
+            build/SHA256SUMS
+            build/notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+    outputs:
+      sha256: ${{ steps.publish.outputs.sha256 }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+      - name: Check the files before upload
+        run: |
+          cd dist
+          ls -l
+          sha256sum -c SHA256SUMS
+          for f in "TapKeys-${TAG}.zip" "TapKeys-${VERSION}.dmg" SHA256SUMS notes.md; do
+            [[ -s "$f" ]] || { echo "::error::$f is missing or empty"; exit 1; }
+          done
+      # A draft is invisible to users, so the assets can be checked before anyone can download them.
+      # A draft left by an earlier failed run is replaced; a published release is never touched.
+      - name: Create draft release
+        run: |
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$state" == true ]]; then
+              echo "Replacing the draft left by an earlier run"
+              gh release delete "$TAG" --yes
+            else
+              echo "::error::Release $TAG is already published. Delete it by hand first if you really want to redo it."
+              exit 1
+            fi
+          fi
+          args=(--draft --verify-tag --title "TapKeys $TAG" --notes-file dist/notes.md)
+          if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${args[@]}" \
+            "dist/TapKeys-${TAG}.zip" "dist/TapKeys-${VERSION}.dmg" dist/SHA256SUMS
+      # GitHub stores a sha256 digest for every uploaded asset: compare it with the local files.
+      # If a digest is missing, the asset is downloaded through the API instead (it works for drafts too).
+      - name: Check the draft assets
+        run: |
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.apiUrl) \(.name) \(.size) \(.digest // "none")"' | tee assets.txt
+          [[ "$(wc -l < assets.txt)" -eq 3 ]] || { echo "::error::expected 3 assets"; exit 1; }
+          while read -r api name size digest; do
+            [[ -s "dist/$name" ]] || { echo "::error::unexpected asset $name"; exit 1; }
+            [[ "$size" -eq "$(wc -c < "dist/$name")" ]] || { echo "::error::$name has size $size on GitHub, local file differs"; exit 1; }
+            local_sha="$(sha256sum "dist/$name" | awk '{print $1}')"
+            if [[ "$digest" == none ]]; then
+              gh api -H 'Accept: application/octet-stream' "repos/${GH_REPO}/releases/assets/${api##*/}" > "downloaded-$name"
+              remote_sha="$(sha256sum "downloaded-$name" | awk '{print $1}')"
+            else
+              remote_sha="${digest#sha256:}"
+            fi
+            [[ "$remote_sha" == "$local_sha" ]] || { echo "::error::$name differs on GitHub (sha256 $remote_sha, local $local_sha)"; exit 1; }
+            echo "OK $name $local_sha"
+          done < assets.txt
+      - name: Publish
+        id: publish
+        run: |
+          if [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
+          expected="$(awk -v f="TapKeys-${TAG}.zip" '$2 == f {print $1}' dist/SHA256SUMS)"
+          echo "sha256=$expected" >> "$GITHUB_OUTPUT"
+      # The public download URL, exactly the one the cask uses. Skipped for a private repository.
+      - name: Check the public download URL
+        env:
+          EXPECTED: ${{ steps.publish.outputs.sha256 }}
+        run: |
+          if [[ "$(gh repo view --json isPrivate --jq .isPrivate)" == true ]]; then
+            echo "::warning::The repository is private, the public URL cannot be checked"
+            exit 0
+          fi
+          url="https://github.com/${GH_REPO}/releases/download/${TAG}/TapKeys-${TAG}.zip"
+          curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o public.zip "$url"
+          actual="$(sha256sum public.zip | awk '{print $1}')"
+          [[ "$actual" == "$EXPECTED" ]] || { echo "::error::sha256 of $url is $actual, expected $EXPECTED"; exit 1; }
+          echo "OK: $url has sha256 $actual"
+
+  cask:
+    name: Update Homebrew cask
+    needs: [build, publish]
+    if: needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # The secret may live in the repository secrets or in the environment "release"
+    # (then it can also be limited to tags v*). The environment is created on first use.
+    environment: release
+    env:
+      # Fine-grained token: Contents read and write, only on scharfff/homebrew-tap.
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.publish.outputs.sha256 }}
+    steps:
+      - name: Without the secret the cask is updated by hand
+        if: env.HOMEBREW_TAP_TOKEN == ''
+        run: |
+          echo "::notice::HOMEBREW_TAP_TOKEN is not set: the release is published, update the cask by hand: version \"${VERSION}\", sha256 \"${SHA256}\"."
+      - name: Check out Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+      - name: Update cask version and sha256
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        working-directory: homebrew-tap
+        run: |
+          cask=Casks/tapkeys.rb
+          # The cask must still build its URL from the version, otherwise a version bump alone would not work.
+          grep -Eq '^ *url "https://github.com/[^"]+/releases/download/v#\{version\}/TapKeys-v#\{version\}\.zip"' "$cask" \
+            || { echo "::error::The url line of $cask does not have the expected form"; exit 1; }
+          sed -E \
+            -e "s/^( *version )\".*\"/\1\"${VERSION}\"/" \
+            -e "s/^( *sha256 )\".*\"/\1\"${SHA256}\"/" \
+            "$cask" > "$cask.new"
+          mv "$cask.new" "$cask"
+          grep -E '^ *(version|sha256) ' "$cask"
+          if git diff --quiet; then
+            echo "Cask already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(cask): обновлён tapkeys до ${VERSION}"
+          # Retry once with a rebase if someone pushed to the tap in the meantime.
+          git push || { git pull --rebase && git push; }
+      # After the push: read the pushed cask, build its url and check that the file downloads
+      # and has the sha256 written in the cask.
+      - name: Check the cask against the public download
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        working-directory: homebrew-tap
+        run: |
+          cask_text="$(git show HEAD:Casks/tapkeys.rb)"
+          cask_version="$(sed -nE 's/^ *version "(.*)"/\1/p' <<< "$cask_text")"
+          cask_sha="$(sed -nE 's/^ *sha256 "(.*)"/\1/p' <<< "$cask_text")"
+          url_template="$(sed -nE 's/^ *url "(.*)"/\1/p' <<< "$cask_text")"
+          url="${url_template//\#\{version\}/$cask_version}"
+          [[ "$cask_version" == "$VERSION" ]] || { echo "::error::cask version is $cask_version, expected $VERSION"; exit 1; }
+          echo "url: $url"
+          curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o cask.zip "$url"
+          actual="$(sha256sum cask.zip | awk '{print $1}')"
+          [[ "$actual" == "$cask_sha" ]] || { echo "::error::sha256 of $url is $actual, the cask says $cask_sha"; exit 1; }
+          echo "OK: the cask url downloads and the sha256 matches ($actual)"

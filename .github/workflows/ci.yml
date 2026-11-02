@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the older run of the same PR.
+# Runs on main are never cancelled, so every commit on main keeps its own result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # actionlint is pinned by version and by the sha256 of the release archive.
+      # It also runs shellcheck over every run: block in the workflows.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+      - name: actionlint (workflows)
+        run: |
+          "$RUNNER_TEMP/actionlint" -color
+      - name: shellcheck (build and packaging scripts)
+        run: shellcheck -x build.sh scripts/*.sh
+
+  build:
+    name: Build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 is retired (2 November 2026), macos-13 earlier; macos-latest is not used on purpose,
+        # so a runner upgrade never changes the toolchain unnoticed. The app targets macOS 13.0:
+        # the deployment target is checked in the smoke test, not by running macOS 13.
+        #   macos-15        Apple Silicon, also the release runner: its DMG and zip are uploaded
+        #   macos-26        Apple Silicon, the newest toolchain and SDK
+        #   macos-15-intel  Intel: the x86_64 slice runs natively here
+        runner: [macos-15, macos-26, macos-15-intel]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcode-select -p
+          swift --version
+      - name: Build universal app
+        run: ./build.sh
+      - name: Self-test
+        run: ./build/TapKeys.app/Contents/MacOS/TapKeys --selftest
+      # Same script as in the release workflow. CI sets CI=true, the window layout comes
+      # from the recorded template scripts/dmg_layout.DS_Store and Finder is not used.
+      - name: Package (zip, DMG, SHA256SUMS)
+        env:
+          DMG_LAYOUT: template
+        run: ./scripts/package.sh
+      - name: Smoke test of the packages
+        run: ./scripts/smoke_test.sh build
+      - name: Job summary
+        if: matrix.runner == 'macos-15'
+        run: |
+          {
+            echo "### Packages from this run"
+            echo "Download them from the Artifacts section of this run page for a manual test."
+            echo '```'
+            cat build/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload packages for manual testing
+        if: matrix.runner == 'macos-15'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TapKeys-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            build/TapKeys-v*.zip
+            build/TapKeys-*.dmg
+            build/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # One stable name for branch protection: the matrix above can change, this check stays.
+  result:
+    name: CI result
+    if: always()
+    needs: [lint, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all jobs to succeed
+        env:
+          LINT: ${{ needs.lint.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "lint: $LINT, build: $BUILD"
+          [[ "$LINT" == success && "$BUILD" == success ]]
