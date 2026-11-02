@@ -4,6 +4,9 @@
 #   build/TapKeys-<version>.dmg    drag to Applications installer (scripts/make_dmg.sh)
 #   build/SHA256SUMS               checksums of both files
 # <version> is CFBundleShortVersionString from the app's Info.plist.
+# RELEASE_TAG (optional, set by release.yml) names the zip after the tag instead, because the cask
+# and the release page use the tag: for a pre-release the tag v0.2.0-rc1 gives TapKeys-v0.2.0-rc1.zip
+# while the DMG stays TapKeys-0.2.0.dmg. The tag must be v<version> or v<version>-<suffix>.
 #
 # Usage: scripts/package.sh        (run ./build.sh first)
 # DMG_LAYOUT is passed on to make_dmg.sh: CI and releases set DMG_LAYOUT=template.
@@ -15,7 +18,12 @@ APP=build/TapKeys.app
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [[ -n "$VERSION" ]] || { echo "error: CFBundleShortVersionString is empty" >&2; exit 1; }
 
-ZIP="TapKeys-v${VERSION}.zip"
+TAG="${RELEASE_TAG:-v${VERSION}}"
+if [[ "$TAG" != "v${VERSION}" && "$TAG" != "v${VERSION}-"* ]]; then
+    echo "error: RELEASE_TAG '$TAG' does not match Info.plist version '$VERSION' (expected v${VERSION} or v${VERSION}-suffix)" >&2
+    exit 1
+fi
+ZIP="TapKeys-${TAG}.zip"
 DMG="TapKeys-${VERSION}.dmg"
 rm -f build/TapKeys-v*.zip build/TapKeys-*.dmg build/SHA256SUMS
 

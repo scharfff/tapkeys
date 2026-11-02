@@ -1,6 +1,8 @@
 name: Release
 
-# Push a tag vX.Y.Z (X.Y.Z must equal CFBundleShortVersionString in Info.plist) to release.
+# Push a tag vX.Y.Z to release, or vX.Y.Z-rc1 (any suffix after the first "-") for a pre-release.
+# X.Y.Z must equal CFBundleShortVersionString in Info.plist and have a CHANGELOG.md section.
+# A pre-release is published as such, with its own zip name, and never touches the Homebrew cask.
 # build    guards, build, zip and DMG, smoke test, SHA256SUMS      (read only token)
 # publish  draft release, check the uploaded assets, publish        (contents: write)
 # cask     update version and sha256 in scharfff/homebrew-tap       (only when HOMEBREW_TAP_TOKEN is set)
@@ -31,7 +33,8 @@ jobs:
       contents: read
       actions: read # for gh run list: the commit must have a green CI run
     outputs:
-      version: ${{ steps.guards.outputs.version }}
+      version: ${{ steps.guards.outputs.version }} # full, 0.2.0-rc1: names the zip, as the tag does
+      base_version: ${{ steps.guards.outputs.base_version }} # 0.2.0: Info.plist, CHANGELOG.md, DMG name
       prerelease: ${{ steps.guards.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,18 +49,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="$GITHUB_REF_NAME"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "::error::Tag '$tag' is not vMAJOR.MINOR.PATCH (a suffix like -rc1 is allowed)."
+          # MAJOR.MINOR.PATCH without leading zeros, then an optional suffix: -rc1, -beta.2
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Tag '$tag' is not vMAJOR.MINOR.PATCH (no leading zeros; a suffix like -rc1 is allowed)."
             exit 1
           fi
-          version="${tag#v}"
+          version="${tag#v}"        # full version of the tag: 0.2.0 or 0.2.0-rc1
+          base_version="${version%%-*}" # without the suffix: 0.2.0
+          prerelease=false
+          if [[ "$version" != "$base_version" ]]; then prerelease=true; fi
+          # Only the base version lives in Info.plist: an rc is a build of the future 0.2.0.
           plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
-          if [[ "$version" != "$plist_version" ]]; then
-            echo "::error::Tag does not match Info.plist: tag $tag gives version '$version', but CFBundleShortVersionString is '$plist_version'. Fix Info.plist or re-tag."
+          if [[ "$base_version" != "$plist_version" ]]; then
+            echo "::error::Tag does not match Info.plist: tag $tag gives base version '$base_version' (full version '$version'), but CFBundleShortVersionString is '$plist_version'. Fix Info.plist or re-tag."
             exit 1
           fi
-          # CHANGELOG.md must have notes for this version.
-          ./scripts/changelog_notes.sh "$version" > /dev/null || { echo "::error::CHANGELOG.md has no notes for $version. Add '## [$version] - YYYY-MM-DD' with entries."; exit 1; }
+          # CHANGELOG.md must have notes for the base version (an rc has no section of its own).
+          ./scripts/changelog_notes.sh "$base_version" > /dev/null || { echo "::error::CHANGELOG.md has no notes for $base_version (tag $tag). Add '## [$base_version] - YYYY-MM-DD' with entries."; exit 1; }
           # The tagged commit must be on main: a release is never built from an unmerged branch.
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -65,15 +73,45 @@ jobs:
             exit 1
           fi
           # CI must have passed on exactly this commit (covers macos-26 and Intel, which this job does not build).
-          green="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --status success --json conclusion --jq 'length')"
-          if [[ "$green" == 0 ]]; then
-            echo "::error::No successful CI run for commit $GITHUB_SHA. Wait for CI on main to pass, then re-run this workflow."
-            exit 1
-          fi
-          prerelease=false
-          if [[ "$tag" == *-* ]]; then prerelease=true; fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          # A tag set right after a merge finds CI still running: wait for it, up to 15 minutes.
+          # Fail at once when CI finished on this commit without a success.
+          deadline=$((SECONDS + 900))
+          gh_failures=0
+          while true; do
+            if ! runs="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --json status,conclusion 2>&1)"; then
+              gh_failures=$((gh_failures + 1))
+              echo "::warning::gh run list failed ($gh_failures of 3): $runs"
+              if [[ "$gh_failures" -ge 3 ]]; then
+                echo "::error::Cannot read the CI runs of commit $GITHUB_SHA. Check that the job has actions: read."
+                exit 1
+              fi
+              sleep 20
+              continue
+            fi
+            gh_failures=0
+            green="$(jq '[.[] | select(.conclusion == "success")] | length' <<< "$runs")"
+            total="$(jq 'length' <<< "$runs")"
+            pending="$(jq '[.[] | select(.status != "completed")] | length' <<< "$runs")"
+            if [[ "$green" -gt 0 ]]; then
+              echo "CI passed on $GITHUB_SHA"
+              break
+            fi
+            if [[ "$total" -gt 0 && "$pending" -eq 0 ]]; then
+              echo "::error::CI finished on commit $GITHUB_SHA without a success. Fix it (or re-run CI), then re-run this workflow or set the tag again."
+              exit 1
+            fi
+            if [[ "$SECONDS" -ge "$deadline" ]]; then
+              echo "::error::No successful CI run for commit $GITHUB_SHA after 15 minutes of waiting ($total runs, $pending still running). Wait for CI on main to pass, then re-run this workflow."
+              exit 1
+            fi
+            echo "CI on $GITHUB_SHA is not finished yet ($total runs, $pending still running), waiting 30 s"
+            sleep 30
+          done
+          {
+            echo "version=$version"
+            echo "base_version=$base_version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
       - name: Toolchain
         run: |
           sw_vers
@@ -87,14 +125,15 @@ jobs:
       - name: Package (zip, DMG, SHA256SUMS)
         env:
           DMG_LAYOUT: template
+          RELEASE_TAG: ${{ github.ref_name }} # the zip is named after the tag, the DMG after Info.plist
         run: ./scripts/package.sh
       - name: Smoke test of the packages
         run: ./scripts/smoke_test.sh build
       - name: Release notes from CHANGELOG.md
         env:
-          VERSION: ${{ steps.guards.outputs.version }}
+          BASE_VERSION: ${{ steps.guards.outputs.base_version }}
         run: |
-          ./scripts/changelog_notes.sh "$VERSION" > build/notes.md
+          ./scripts/changelog_notes.sh "$BASE_VERSION" > build/notes.md
           cat build/notes.md
       - name: Upload release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -119,7 +158,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
-      VERSION: ${{ needs.build.outputs.version }}
+      BASE_VERSION: ${{ needs.build.outputs.base_version }}
       PRERELEASE: ${{ needs.build.outputs.prerelease }}
     outputs:
       sha256: ${{ steps.publish.outputs.sha256 }}
@@ -133,7 +172,7 @@ jobs:
           cd dist
           ls -l
           sha256sum -c SHA256SUMS
-          for f in "TapKeys-${TAG}.zip" "TapKeys-${VERSION}.dmg" SHA256SUMS notes.md; do
+          for f in "TapKeys-${TAG}.zip" "TapKeys-${BASE_VERSION}.dmg" SHA256SUMS notes.md; do
             [[ -s "$f" ]] || { echo "::error::$f is missing or empty"; exit 1; }
           done
       # A draft is invisible to users, so the assets can be checked before anyone can download them.
@@ -152,7 +191,7 @@ jobs:
           args=(--draft --verify-tag --title "TapKeys $TAG" --notes-file dist/notes.md)
           if [[ "$PRERELEASE" == true ]]; then args+=(--prerelease); fi
           gh release create "$TAG" "${args[@]}" \
-            "dist/TapKeys-${TAG}.zip" "dist/TapKeys-${VERSION}.dmg" dist/SHA256SUMS
+            "dist/TapKeys-${TAG}.zip" "dist/TapKeys-${BASE_VERSION}.dmg" dist/SHA256SUMS
       # GitHub stores a sha256 digest for every uploaded asset: compare it with the local files.
       # If a digest is missing, the asset is downloaded through the API instead (it works for drafts too).
       - name: Check the draft assets

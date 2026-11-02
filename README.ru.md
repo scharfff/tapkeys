@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/icon.png" width="128" alt="Иконка TapKeys">
   <h1>TapKeys</h1>
-  <p><b>Бесплатные жесты трекпада для macOS с открытым кодом.</b><br>Для тех, кому от BetterTouchTool нужно всего несколько триггеров: двойной тап для копирования, клик тремя пальцами для вставки.</p>
+  <p><b>Команды и жесты трекпада для macOS с открытым кодом.</b><br>Назначайте свои сочетания клавиш и действия на тапы и клики по трекпаду прямо из строки меню.</p>
   <p><a href="README.md">English</a> · <b>Русский</b></p>
   <p>
     <a href="https://github.com/scharfff/tapkeys/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/github/v/release/scharfff/tapkeys?style=flat-square"></a>
@@ -104,6 +104,7 @@ open build/TapKeys.app
 | `scripts/make_dmg_background.swift` | рисует фон окна DMG в `Resources/` |
 | `scripts/package.sh` | собирает zip, DMG и `SHA256SUMS` для релиза |
 | `scripts/smoke_test.sh` | проверяет готовый пакет: подпись, обе архитектуры, самотест из DMG |
+| `scripts/detach_image.sh` | отмонтирует образ диска с повторными попытками (нужен сборке DMG и smoke-тесту) |
 | `scripts/changelog_notes.sh` | достаёт заметки к версии из `CHANGELOG.md` |
 | `.github/workflows/ci.yml` | сборка и проверки при каждом push и pull request |
 | `.github/workflows/release.yml` | черновик, проверка и публикация релиза по тегам `v*`, затем обновление формулы Homebrew |
